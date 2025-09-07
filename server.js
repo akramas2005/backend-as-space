@@ -3,8 +3,10 @@ import express from 'express';
 import multer from 'multer';
 import fs from 'fs';
 import mysql from 'mysql2/promise';
+import cors from 'cors';
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 // --- env / defaults ---
@@ -137,3 +139,4 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 app.listen(PORT, () => {
   console.log('Server listening on port', PORT);
 });
+
