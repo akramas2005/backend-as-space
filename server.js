@@ -69,11 +69,26 @@ app.post('/api/files', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'no file' });
     const { originalname, mimetype, buffer } = req.file;
 
+    // خزّن الملف في Cluster1
     const sql = 'INSERT INTO files (filename, mime_type, file_data) VALUES (?, ?, ?)';
     const [result] = await poolFiles.execute(sql, [originalname, mimetype, buffer]);
     const fileId = result.insertId;
     const fileUrl = `https://backend-as-space-1.onrender.com/api/files/${fileId}`;
-    return res.json({ id: fileId, url: fileUrl, filename: originalname, mime_type: mimetype });
+
+    // 🟢 أضف أيضاً إدخال في جدول messages (Cluster0)
+    const msgSql = `INSERT INTO messages (role, content, attachment_id, attachment_url, attachment_name, attachment_type)
+                    VALUES (?, ?, ?, ?, ?, ?)`;
+    await poolText.execute(msgSql, [
+      'user', '', fileId, fileUrl, originalname, mimetype
+    ]);
+
+    // رجّع البيانات كاملة
+    return res.json({
+      id: fileId,
+      url: fileUrl,
+      filename: originalname,
+      mime_type: mimetype
+    });
   } catch (err) {
     console.error('POST /api/files error', err);
     return res.status(500).json({ error: 'upload failed' });
@@ -145,6 +160,7 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 app.listen(PORT, () => {
   console.log('Server listening on port', PORT);
 });
+
 
 
 
