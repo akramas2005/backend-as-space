@@ -90,9 +90,9 @@ app.post('/api/files', upload.single('file'), async (req, res) => {
       mime_type: mimetype
     });
   } catch (err) {
-    console.error('POST /api/files error', err);
-    return res.status(500).json({ error: 'upload failed' });
-  }
+  console.error('POST /api/files error:', err.message, err.stack);
+  return res.status(500).json({ error: 'upload failed', details: err.message });
+}
 });
 
 // GET /api/files/:id -> stream file content from DB
@@ -160,6 +160,7 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 app.listen(PORT, () => {
   console.log('Server listening on port', PORT);
 });
+
 
 
 
