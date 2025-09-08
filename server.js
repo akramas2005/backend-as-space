@@ -7,7 +7,7 @@ import cors from 'cors';
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '5mb' })); // 🟢 نحدد حجم الرسالة النصية (5MB كافي)
 
 // --- env / defaults ---
 const PORT = process.env.PORT || 3000;
@@ -100,6 +100,12 @@ app.get('/api/files/:id', async (req, res) => {
 app.post('/api/messages', async (req, res) => {
   try {
     const { role, content, parent_id = null, attachmentId = null, attachmentUrl = null, attachmentName = null, attachmentType = null } = req.body;
+
+    // 🟢 نتأكد أننا ما نخزن ملف ضخم هنا، فقط البيانات النصية + الرابط
+    if (content && content.length > 10000) {
+      return res.status(413).json({ error: 'message too large' });
+    }
+
     const sql = `INSERT INTO messages (role, content, parent_id, attachment_id, attachment_url, attachment_name, attachment_type) VALUES (?, ?, ?, ?, ?, ?, ?)`;
     const [result] = await poolText.execute(sql, [role, content, parent_id, attachmentId, attachmentUrl, attachmentName, attachmentType]);
     return res.json({ id: result.insertId });
@@ -139,4 +145,5 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 app.listen(PORT, () => {
   console.log('Server listening on port', PORT);
 });
+
 
