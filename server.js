@@ -72,7 +72,7 @@ app.post('/api/files', upload.single('file'), async (req, res) => {
     const sql = 'INSERT INTO files (filename, mime_type, file_data) VALUES (?, ?, ?)';
     const [result] = await poolFiles.execute(sql, [originalname, mimetype, buffer]);
     const fileId = result.insertId;
-    const fileUrl = `${req.protocol}://${req.get('host')}/api/files/${fileId}`;
+    const fileUrl = `https://${req.get('host')}/api/files/${fileId}`;
     return res.json({ id: fileId, url: fileUrl, filename: originalname, mime_type: mimetype });
   } catch (err) {
     console.error('POST /api/files error', err);
@@ -145,5 +145,6 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 app.listen(PORT, () => {
   console.log('Server listening on port', PORT);
 });
+
 
 
