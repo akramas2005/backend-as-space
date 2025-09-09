@@ -62,10 +62,18 @@ const poolFiles = mysql.createPool({
   ssl: ca1path ? { ca: fs.readFileSync(ca1path) } : undefined
 });
 
-// multer memory storage
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB cap
+// multer disk storage (temporary file)
+const upload = multer({ 
+  storage: multer.diskStorage({
+    destination: '/tmp',
+    filename: (req, file, cb) => {
+      cb(null, Date.now() + '-' + file.originalname);
+    }
+  }),
+  limits: { fileSize: 50 * 1024 * 1024 } // 50MB cap
+});
 
-// POST /api/files  -> upload file to Cluster1, return file id & url
+// POST /api/files
 app.post('/api/files', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
@@ -73,18 +81,21 @@ app.post('/api/files', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'no file' });
     }
 
-    // ✅ log details عشان نعرف يوصل ولا لأ
-    console.log('📂 File received:', req.file.originalname, 
-                'size=', req.file.size, 
-                'type=', req.file.mimetype);
+    // log info
+    console.log('📂 File received:', req.file.originalname, 'size=', req.file.size, 'path=', req.file.path);
 
-    const { originalname, mimetype, buffer } = req.file;
+    // read file from /tmp
+    const buffer = fs.readFileSync(req.file.path);
 
     const sql = 'INSERT INTO files (filename, mime_type, file_data) VALUES (?, ?, ?)';
-    const [result] = await poolFiles.execute(sql, [originalname, mimetype, buffer]);
+    const [result] = await poolFiles.execute(sql, [req.file.originalname, req.file.mimetype, buffer]);
     const fileId = result.insertId;
+
+    // cleanup tmp file
+    fs.unlinkSync(req.file.path);
+
     const fileUrl = `https://${req.get('host')}/api/files/${fileId}`;
-    return res.json({ id: fileId, url: fileUrl, filename: originalname, mime_type: mimetype });
+    return res.json({ id: fileId, url: fileUrl, filename: req.file.originalname, mime_type: req.file.mimetype });
   } catch (err) {
     console.error('❌ POST /api/files error', err);
     return res.status(500).json({ error: 'upload failed' });
@@ -155,6 +166,7 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 app.listen(PORT, () => {
   console.log('🚀 Server listening on port', PORT);
 });
+
 
 
 
