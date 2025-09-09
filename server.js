@@ -4,6 +4,7 @@ import multer from 'multer';
 import fs from 'fs';
 import mysql from 'mysql2/promise';
 import cors from 'cors';
+import { PassThrough } from 'stream';
 
 const app = express();
 app.use(cors());
@@ -63,50 +64,69 @@ const poolFiles = mysql.createPool({
 // multer memory storage
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB cap
 
-// POST /api/files  -> upload file to Cluster1, return file id & url
 app.post('/api/files', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'no file' });
-    const { originalname, mimetype, buffer } = req.file;
 
-    // خزّن الملف في Cluster1
+    const { originalname, mimetype, buffer } = req.file;
+    // debug log: حجم البافر قبل الإدخال
+    console.log('POST /api/files - incoming file:', { originalname, mimetype, size: buffer ? buffer.length : 0 });
+
     const sql = 'INSERT INTO files (filename, mime_type, file_data) VALUES (?, ?, ?)';
     const [result] = await poolFiles.execute(sql, [originalname, mimetype, buffer]);
     const fileId = result.insertId;
     const fileUrl = `https://backend-as-space-1.onrender.com/api/files/${fileId}`;
 
-    // 🟢 أضف أيضاً إدخال في جدول messages (Cluster0)
-    const msgSql = `INSERT INTO messages (role, content, attachment_id, attachment_url, attachment_name, attachment_type)
-                    VALUES (?, ?, ?, ?, ?, ?)`;
-    await poolText.execute(msgSql, [
-      'user', '', fileId, fileUrl, originalname, mimetype
-    ]);
+    console.log('POST /api/files - stored id=', fileId, 'url=', fileUrl);
 
-    // رجّع البيانات كاملة
-    return res.json({
-      id: fileId,
-      url: fileUrl,
-      filename: originalname,
-      mime_type: mimetype
-    });
+    // اختياري: سجّل رسالة في جدول messages حتى يظهر المرفق تلقائياً في المحادثة
+    try {
+      const msgSql = `INSERT INTO messages (role, content, attachment_id, attachment_url, attachment_name, attachment_type)
+                      VALUES (?, ?, ?, ?, ?, ?)`;
+      await poolText.execute(msgSql, ['user', '', fileId, fileUrl, originalname, mimetype]);
+      console.log('POST /api/files - message created for fileId=', fileId);
+    } catch (msgErr) {
+      console.warn('POST /api/files - failed to create message entry:', msgErr && (msgErr.message || msgErr));
+      // لا نعيد الخطأ لأنه ليس خطأً قاتلاً للرفع نفسه
+    }
+
+    return res.json({ id: fileId, url: fileUrl, filename: originalname, mime_type: mimetype });
   } catch (err) {
-  console.error('POST /api/files error:', err.message, err.stack);
-  return res.status(500).json({ error: 'upload failed', details: err.message });
-}
+    console.error('POST /api/files error:', err && (err.stack || err.message || err));
+    return res.status(500).json({ error: 'upload failed', details: err && err.message });
+  }
 });
 
-// GET /api/files/:id -> stream file content from DB
 app.get('/api/files/:id', async (req, res) => {
   try {
     const id = Number(req.params.id || 0);
     const [rows] = await poolFiles.execute('SELECT filename, mime_type, file_data FROM files WHERE id = ?', [id]);
-    if (!rows || rows.length === 0) return res.status(404).send('Not found');
+
+    if (!rows || rows.length === 0) {
+      console.warn('GET /api/files - not found id=', id);
+      return res.status(404).send('Not found');
+    }
+
     const row = rows[0];
+    const buf = row.file_data;
+    const size = buf ? (Buffer.isBuffer(buf) ? buf.length : (buf.length || 0)) : 0;
+
+    console.log(`GET /api/files id=${id} filename=${row.filename} mime=${row.mime_type} size=${size}`);
+
+    if (!buf || size === 0) {
+      // إذا لا توجد بيانات، نعيد 404 بدل 502
+      return res.status(404).send('Not found');
+    }
+
     res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
     res.setHeader('Content-Disposition', `inline; filename="${row.filename}"`);
-    res.send(row.file_data);
+
+    // stream the buffer to response (safer for big buffers)
+    const stream = new PassThrough();
+    stream.end(buf);
+    stream.pipe(res);
   } catch (err) {
-    console.error('GET /api/files/:id error', err);
+    console.error('GET /api/files/:id error:', err && (err.stack || err.message || err));
     res.status(500).send('error');
   }
 });
@@ -160,6 +180,7 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 app.listen(PORT, () => {
   console.log('Server listening on port', PORT);
 });
+
 
 
 
