@@ -1,3 +1,4 @@
+// server.js
 import express from 'express';
 import multer from 'multer';
 import fs from 'fs';
@@ -6,10 +7,7 @@ import cors from 'cors';
 
 const app = express();
 app.use(cors());
-
-// ✅ نرفع الحد من 5MB إلى 50MB للـ JSON و URL-encoded
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(express.json({ limit: '5mb' })); // 🟢 نحدد حجم الرسالة النصية (5MB كافي)
 
 // --- env / defaults ---
 const PORT = process.env.PORT || 3000;
@@ -62,44 +60,39 @@ const poolFiles = mysql.createPool({
   ssl: ca1path ? { ca: fs.readFileSync(ca1path) } : undefined
 });
 
-// multer disk storage (temporary file)
-const upload = multer({ 
-  storage: multer.diskStorage({
-    destination: '/tmp',
-    filename: (req, file, cb) => {
-      cb(null, Date.now() + '-' + file.originalname);
-    }
-  }),
-  limits: { fileSize: 50 * 1024 * 1024 } // 50MB cap
-});
+// multer memory storage
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB cap
 
-// POST /api/files
+// POST /api/files  -> upload file to Cluster1, return file id & url
 app.post('/api/files', upload.single('file'), async (req, res) => {
   try {
-    if (!req.file) {
-      console.error('⚠️ No file received!');
-      return res.status(400).json({ error: 'no file' });
-    }
+    if (!req.file) return res.status(400).json({ error: 'no file' });
+    const { originalname, mimetype, buffer } = req.file;
 
-    // log info
-    console.log('📂 File received:', req.file.originalname, 'size=', req.file.size, 'path=', req.file.path);
-
-    // read file from /tmp
-    const buffer = fs.readFileSync(req.file.path);
-
+    // خزّن الملف في Cluster1
     const sql = 'INSERT INTO files (filename, mime_type, file_data) VALUES (?, ?, ?)';
-    const [result] = await poolFiles.execute(sql, [req.file.originalname, req.file.mimetype, buffer]);
+    const [result] = await poolFiles.execute(sql, [originalname, mimetype, buffer]);
     const fileId = result.insertId;
+    const fileUrl = `https://backend-as-space-1.onrender.com/api/files/${fileId}`;
 
-    // cleanup tmp file
-    fs.unlinkSync(req.file.path);
+    // 🟢 أضف أيضاً إدخال في جدول messages (Cluster0)
+    const msgSql = `INSERT INTO messages (role, content, attachment_id, attachment_url, attachment_name, attachment_type)
+                    VALUES (?, ?, ?, ?, ?, ?)`;
+    await poolText.execute(msgSql, [
+      'user', '', fileId, fileUrl, originalname, mimetype
+    ]);
 
-    const fileUrl = `https://${req.get('host')}/api/files/${fileId}`;
-    return res.json({ id: fileId, url: fileUrl, filename: req.file.originalname, mime_type: req.file.mimetype });
+    // رجّع البيانات كاملة
+    return res.json({
+      id: fileId,
+      url: fileUrl,
+      filename: originalname,
+      mime_type: mimetype
+    });
   } catch (err) {
-    console.error('❌ POST /api/files error', err);
-    return res.status(500).json({ error: 'upload failed' });
-  }
+  console.error('POST /api/files error:', err.message, err.stack);
+  return res.status(500).json({ error: 'upload failed', details: err.message });
+}
 });
 
 // GET /api/files/:id -> stream file content from DB
@@ -113,7 +106,7 @@ app.get('/api/files/:id', async (req, res) => {
     res.setHeader('Content-Disposition', `inline; filename="${row.filename}"`);
     res.send(row.file_data);
   } catch (err) {
-    console.error('❌ GET /api/files/:id error', err);
+    console.error('GET /api/files/:id error', err);
     res.status(500).send('error');
   }
 });
@@ -123,6 +116,7 @@ app.post('/api/messages', async (req, res) => {
   try {
     const { role, content, parent_id = null, attachmentId = null, attachmentUrl = null, attachmentName = null, attachmentType = null } = req.body;
 
+    // 🟢 نتأكد أننا ما نخزن ملف ضخم هنا، فقط البيانات النصية + الرابط
     if (content && content.length > 10000) {
       return res.status(413).json({ error: 'message too large' });
     }
@@ -131,7 +125,7 @@ app.post('/api/messages', async (req, res) => {
     const [result] = await poolText.execute(sql, [role, content, parent_id, attachmentId, attachmentUrl, attachmentName, attachmentType]);
     return res.json({ id: result.insertId });
   } catch (err) {
-    console.error('❌ POST /api/messages error', err);
+    console.error('POST /api/messages error', err);
     return res.status(500).json({ error: 'save failed' });
   }
 });
@@ -143,7 +137,7 @@ app.get('/api/messages', async (req, res) => {
     const [rows] = await poolText.execute('SELECT id, role, content, parent_id, attachment_id, attachment_url, attachment_name, attachment_type, created_at FROM messages ORDER BY created_at ASC LIMIT ?', [limit]);
     return res.json(rows);
   } catch (err) {
-    console.error('❌ GET /api/messages error', err);
+    console.error('GET /api/messages error', err);
     return res.status(500).json({ error: 'fetch failed' });
   }
 });
@@ -155,7 +149,7 @@ app.post('/api/cleanup', async (req, res) => {
     await poolFiles.execute("DELETE FROM files WHERE created_at < NOW() - INTERVAL 30 DAY");
     return res.json({ ok: true });
   } catch (err) {
-    console.error('❌ POST /api/cleanup error', err);
+    console.error('POST /api/cleanup error', err);
     return res.status(500).json({ error: 'cleanup failed' });
   }
 });
@@ -164,5 +158,11 @@ app.post('/api/cleanup', async (req, res) => {
 app.get('/health', (req, res) => res.json({ ok: true }));
 
 app.listen(PORT, () => {
-  console.log('🚀 Server listening on port', PORT);
+  console.log('Server listening on port', PORT);
 });
+
+
+
+
+
+
