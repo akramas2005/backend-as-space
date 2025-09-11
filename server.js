@@ -59,6 +59,25 @@ const poolFiles = mysql.createPool({
   waitForConnections: true, connectionLimit: 10,
   ssl: ca1path ? { ca: fs.readFileSync(ca1path) } : undefined
 });
+// DELETE file by id
+app.delete('/api/files/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!id) return res.status(400).json({ error: 'missing id' });
+
+    // احذف من جدول files
+    const [result] = await poolFiles.execute('DELETE FROM files WHERE id = ?', [id]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'file not found' });
+    }
+
+    return res.json({ ok: true, deleted: id });
+  } catch (err) {
+    console.error('DELETE /api/files error', err);
+    res.status(500).json({ error: 'delete failed' });
+  }
+});
 
 // multer memory storage
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB cap
@@ -160,6 +179,7 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 app.listen(PORT, () => {
   console.log('Server listening on port', PORT);
 });
+
 
 
 
