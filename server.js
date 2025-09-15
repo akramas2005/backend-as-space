@@ -60,6 +60,8 @@ const poolFiles = mysql.createPool({
   ssl: ca1path ? { ca: fs.readFileSync(ca1path) } : undefined
 });
 
+// ----------------- DELETE routes -----------------
+
 // DELETE file by id
 app.delete('/api/files/:id', async (req, res) => {
   try {
@@ -98,20 +100,17 @@ app.delete('/api/messages/:id', async (req, res) => {
   }
 });
 
-// DELETE messages from a message timestamp onward (delete message and following messages in same conversation)
-// Usage: DELETE /api/messages/after/:id
+// DELETE messages from a message timestamp onward
 app.delete('/api/messages/after/:id', async (req, res) => {
   try {
     const id = Number(req.params.id || 0);
     if (!id) return res.status(400).json({ error: 'missing id' });
 
-    // get the message timestamp and conversation_id
     const [rows] = await poolText.execute('SELECT created_at, conversation_id FROM messages WHERE id = ?', [id]);
     if (!rows || rows.length === 0) return res.status(404).json({ error: 'message not found' });
 
     const { created_at, conversation_id } = rows[0];
     if (!conversation_id) {
-      // if no conversation_id, delete messages with created_at >= that timestamp (global)
       await poolText.execute('DELETE FROM messages WHERE created_at >= ?', [created_at]);
       await poolFiles.execute('DELETE FROM files WHERE created_at >= ?', [created_at]);
     } else {
@@ -126,7 +125,7 @@ app.delete('/api/messages/after/:id', async (req, res) => {
   }
 });
 
-// DELETE entire conversation (messages + files) by conversation_id
+// DELETE entire conversation
 app.delete('/api/conversations/:id', async (req, res) => {
   try {
     const convId = req.params.id;
@@ -142,7 +141,7 @@ app.delete('/api/conversations/:id', async (req, res) => {
   }
 });
 
-// DELETE all messages (reset chat) - keep but careful (admin)
+// DELETE all (admin)
 app.delete('/api/conversations/all', async (req, res) => {
   try {
     await poolText.execute('DELETE FROM messages');
@@ -154,24 +153,22 @@ app.delete('/api/conversations/all', async (req, res) => {
   }
 });
 
-// multer memory storage
+// ----------------- Upload & Messages -----------------
+
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB cap
 
-// POST /api/files  -> upload file to Cluster1, return file id & url
+// POST /api/files
 app.post('/api/files', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'no file' });
     const { originalname, mimetype, buffer } = req.file;
-    // conversation_id is optional form field
     const conversation_id = (req.body && req.body.conversation_id) ? String(req.body.conversation_id) : null;
 
-    // خزّن الملف في Cluster1 (مع conversation_id)
     const sql = 'INSERT INTO files (filename, mime_type, file_data, conversation_id) VALUES (?, ?, ?, ?)';
     const [result] = await poolFiles.execute(sql, [originalname, mimetype, buffer, conversation_id]);
     const fileId = result.insertId;
     const fileUrl = `https://backend-as-space-1.onrender.com/api/files/${fileId}`;
 
-    // أضف أيضاً إدخال في جدول messages (Cluster0) مربوط بالمحادثة
     const msgSql = `INSERT INTO messages (role, content, attachment_id, attachment_url, attachment_name, attachment_type, conversation_id)
                     VALUES (?, ?, ?, ?, ?, ?, ?)`;
     await poolText.execute(msgSql, [
@@ -182,7 +179,8 @@ app.post('/api/files', upload.single('file'), async (req, res) => {
       id: fileId,
       url: fileUrl,
       filename: originalname,
-      mime_type: mimetype
+      mime_type: mimetype,
+      conversation_id
     });
   } catch (err) {
     console.error('POST /api/files error:', err.message, err.stack);
@@ -190,7 +188,7 @@ app.post('/api/files', upload.single('file'), async (req, res) => {
   }
 });
 
-// GET /api/files/:id -> stream file content from DB
+// GET /api/files/:id
 app.get('/api/files/:id', async (req, res) => {
   try {
     const id = Number(req.params.id || 0);
@@ -206,7 +204,7 @@ app.get('/api/files/:id', async (req, res) => {
   }
 });
 
-// POST /api/messages -> save message in Cluster0 (يدعم conversation_id الآن)
+// POST /api/messages
 app.post('/api/messages', async (req, res) => {
   try {
     const {
@@ -235,7 +233,7 @@ app.post('/api/messages', async (req, res) => {
   }
 });
 
-// GET /api/messages?limit=200&conversation_id=conv_x -> return messages (supports conversation filter)
+// GET /api/messages
 app.get('/api/messages', async (req, res) => {
   try {
     const limit = Math.min(1000, Number(req.query.limit || 200));
@@ -244,7 +242,7 @@ app.get('/api/messages', async (req, res) => {
     let rows;
     if (convoId) {
       [rows] = await poolText.execute(
-        `SELECT id, role, content, parent_id, attachment_id, attachment_url, attachment_name, attachment_type, created_at
+        `SELECT id, role, content, parent_id, attachment_id, attachment_url, attachment_name, attachment_type, created_at, conversation_id
          FROM messages
          WHERE conversation_id = ?
          ORDER BY created_at ASC LIMIT ?`,
@@ -252,7 +250,7 @@ app.get('/api/messages', async (req, res) => {
       );
     } else {
       [rows] = await poolText.execute(
-        `SELECT id, role, content, parent_id, attachment_id, attachment_url, attachment_name, attachment_type, created_at
+        `SELECT id, role, content, parent_id, attachment_id, attachment_url, attachment_name, attachment_type, created_at, conversation_id
          FROM messages
          ORDER BY created_at ASC LIMIT ?`,
         [limit]
@@ -266,7 +264,7 @@ app.get('/api/messages', async (req, res) => {
   }
 });
 
-// POST /api/cleanup -> deletes expired (can be secured later)
+// ----------------- Cleanup -----------------
 app.post('/api/cleanup', async (req, res) => {
   try {
     await poolText.execute("DELETE FROM messages WHERE created_at < NOW() - INTERVAL 90 DAY");
@@ -284,13 +282,3 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 app.listen(PORT, () => {
   console.log('Server listening on port', PORT);
 });
-
-
-
-
-
-
-
-
-
-
