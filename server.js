@@ -59,13 +59,13 @@ const poolFiles = mysql.createPool({
   waitForConnections: true, connectionLimit: 10,
   ssl: ca1path ? { ca: fs.readFileSync(ca1path) } : undefined
 });
+
 // DELETE file by id
 app.delete('/api/files/:id', async (req, res) => {
   try {
     const id = req.params.id;
     if (!id) return res.status(400).json({ error: 'missing id' });
 
-    // احذف من جدول files
     const [result] = await poolFiles.execute('DELETE FROM files WHERE id = ?', [id]);
 
     if (result.affectedRows === 0) {
@@ -79,13 +79,12 @@ app.delete('/api/files/:id', async (req, res) => {
   }
 });
 
-    // DELETE message by id
+// DELETE message by id
 app.delete('/api/messages/:id', async (req, res) => {
   try {
     const id = req.params.id;
     if (!id) return res.status(400).json({ error: 'missing id' });
 
-    // امسح من جدول messages
     const [result] = await poolText.execute('DELETE FROM messages WHERE id = ?', [id]);
 
     if (result.affectedRows === 0) {
@@ -99,7 +98,51 @@ app.delete('/api/messages/:id', async (req, res) => {
   }
 });
 
-    // DELETE all messages (reset chat)
+// DELETE messages from a message timestamp onward (delete message and following messages in same conversation)
+// Usage: DELETE /api/messages/after/:id
+app.delete('/api/messages/after/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id || 0);
+    if (!id) return res.status(400).json({ error: 'missing id' });
+
+    // get the message timestamp and conversation_id
+    const [rows] = await poolText.execute('SELECT created_at, conversation_id FROM messages WHERE id = ?', [id]);
+    if (!rows || rows.length === 0) return res.status(404).json({ error: 'message not found' });
+
+    const { created_at, conversation_id } = rows[0];
+    if (!conversation_id) {
+      // if no conversation_id, delete messages with created_at >= that timestamp (global)
+      await poolText.execute('DELETE FROM messages WHERE created_at >= ?', [created_at]);
+      await poolFiles.execute('DELETE FROM files WHERE created_at >= ?', [created_at]);
+    } else {
+      await poolText.execute('DELETE FROM messages WHERE conversation_id = ? AND created_at >= ?', [conversation_id, created_at]);
+      await poolFiles.execute('DELETE FROM files WHERE conversation_id = ? AND created_at >= ?', [conversation_id, created_at]);
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('DELETE /api/messages/after error', err);
+    return res.status(500).json({ error: 'delete failed' });
+  }
+});
+
+// DELETE entire conversation (messages + files) by conversation_id
+app.delete('/api/conversations/:id', async (req, res) => {
+  try {
+    const convId = req.params.id;
+    if (!convId) return res.status(400).json({ error: 'missing id' });
+
+    const [msgsResult] = await poolText.execute('DELETE FROM messages WHERE conversation_id = ?', [convId]);
+    const [filesResult] = await poolFiles.execute('DELETE FROM files WHERE conversation_id = ?', [convId]);
+
+    return res.json({ ok: true, messages_deleted: msgsResult.affectedRows, files_deleted: filesResult.affectedRows });
+  } catch (err) {
+    console.error('DELETE /api/conversations error', err);
+    return res.status(500).json({ error: 'delete failed' });
+  }
+});
+
+// DELETE all messages (reset chat) - keep but careful (admin)
 app.delete('/api/conversations/all', async (req, res) => {
   try {
     await poolText.execute('DELETE FROM messages');
@@ -119,21 +162,22 @@ app.post('/api/files', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'no file' });
     const { originalname, mimetype, buffer } = req.file;
+    // conversation_id is optional form field
+    const conversation_id = (req.body && req.body.conversation_id) ? String(req.body.conversation_id) : null;
 
-    // خزّن الملف في Cluster1
-    const sql = 'INSERT INTO files (filename, mime_type, file_data) VALUES (?, ?, ?)';
-    const [result] = await poolFiles.execute(sql, [originalname, mimetype, buffer]);
+    // خزّن الملف في Cluster1 (مع conversation_id)
+    const sql = 'INSERT INTO files (filename, mime_type, file_data, conversation_id) VALUES (?, ?, ?, ?)';
+    const [result] = await poolFiles.execute(sql, [originalname, mimetype, buffer, conversation_id]);
     const fileId = result.insertId;
     const fileUrl = `https://backend-as-space-1.onrender.com/api/files/${fileId}`;
 
-    // 🟢 أضف أيضاً إدخال في جدول messages (Cluster0)
-    const msgSql = `INSERT INTO messages (role, content, attachment_id, attachment_url, attachment_name, attachment_type)
-                    VALUES (?, ?, ?, ?, ?, ?)`;
+    // أضف أيضاً إدخال في جدول messages (Cluster0) مربوط بالمحادثة
+    const msgSql = `INSERT INTO messages (role, content, attachment_id, attachment_url, attachment_name, attachment_type, conversation_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)`;
     await poolText.execute(msgSql, [
-      'user', '', fileId, fileUrl, originalname, mimetype
+      'user', '', fileId, fileUrl, originalname, mimetype, conversation_id
     ]);
 
-    // رجّع البيانات كاملة
     return res.json({
       id: fileId,
       url: fileUrl,
@@ -141,9 +185,9 @@ app.post('/api/files', upload.single('file'), async (req, res) => {
       mime_type: mimetype
     });
   } catch (err) {
-  console.error('POST /api/files error:', err.message, err.stack);
-  return res.status(500).json({ error: 'upload failed', details: err.message });
-}
+    console.error('POST /api/files error:', err.message, err.stack);
+    return res.status(500).json({ error: 'upload failed', details: err.message });
+  }
 });
 
 // GET /api/files/:id -> stream file content from DB
@@ -162,30 +206,63 @@ app.get('/api/files/:id', async (req, res) => {
   }
 });
 
-// POST /api/messages -> save message in Cluster0
+// POST /api/messages -> save message in Cluster0 (يدعم conversation_id الآن)
 app.post('/api/messages', async (req, res) => {
   try {
-    const { role, content, parent_id = null, attachmentId = null, attachmentUrl = null, attachmentName = null, attachmentType = null } = req.body;
+    const {
+      role,
+      content,
+      parent_id = null,
+      attachmentId = null,
+      attachmentUrl = null,
+      attachmentName = null,
+      attachmentType = null,
+      conversation_id = null
+    } = req.body;
 
-    // 🟢 نتأكد أننا ما نخزن ملف ضخم هنا، فقط البيانات النصية + الرابط
     if (content && content.length > 10000) {
       return res.status(413).json({ error: 'message too large' });
     }
 
-    const sql = `INSERT INTO messages (role, content, parent_id, attachment_id, attachment_url, attachment_name, attachment_type) VALUES (?, ?, ?, ?, ?, ?, ?)`;
-    const [result] = await poolText.execute(sql, [role, content, parent_id, attachmentId, attachmentUrl, attachmentName, attachmentType]);
-    return res.json({ id: result.insertId });
+    const sql = `INSERT INTO messages
+      (role, content, parent_id, attachment_id, attachment_url, attachment_name, attachment_type, conversation_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
+    const [result] = await poolText.execute(sql, [role, content, parent_id, attachmentId, attachmentUrl, attachmentName, attachmentType, conversation_id]);
+    return res.json({ id: result.insertId, conversation_id });
   } catch (err) {
     console.error('POST /api/messages error', err);
     return res.status(500).json({ error: 'save failed' });
   }
 });
 
-// GET /api/messages?limit=200  -> return last N messages (ordered asc)
+// GET /api/messages?limit=200&conversation_id=conv_x -> return messages (supports conversation filter)
 app.get('/api/messages', async (req, res) => {
   try {
     const limit = Math.min(1000, Number(req.query.limit || 200));
-    const [rows] = await poolText.execute('SELECT id, role, content, parent_id, attachment_id, attachment_url, attachment_name, attachment_type, created_at FROM messages ORDER BY created_at ASC LIMIT ?', [limit]);
+    const convId = req.query.conversation_id || null;
+
+    let rows;
+    if (convId) {
+      const [r] = await poolText.execute(
+        `SELECT id, role, content, parent_id, attachment_id, attachment_url, attachment_name, attachment_type, conversation_id, created_at
+         FROM messages
+         WHERE conversation_id = ?
+         ORDER BY created_at ASC
+         LIMIT ?`,
+        [convId, limit]
+      );
+      rows = r;
+    } else {
+      const [r] = await poolText.execute(
+        `SELECT id, role, content, parent_id, attachment_id, attachment_url, attachment_name, attachment_type, conversation_id, created_at
+         FROM messages
+         ORDER BY created_at ASC
+         LIMIT ?`,
+        [limit]
+      );
+      rows = r;
+    }
+
     return res.json(rows);
   } catch (err) {
     console.error('GET /api/messages error', err);
@@ -211,6 +288,7 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 app.listen(PORT, () => {
   console.log('Server listening on port', PORT);
 });
+
 
 
 
