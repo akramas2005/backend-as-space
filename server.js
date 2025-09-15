@@ -79,6 +79,38 @@ app.delete('/api/files/:id', async (req, res) => {
   }
 });
 
+    // DELETE message by id
+app.delete('/api/messages/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!id) return res.status(400).json({ error: 'missing id' });
+
+    // امسح من جدول messages
+    const [result] = await poolText.execute('DELETE FROM messages WHERE id = ?', [id]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'message not found' });
+    }
+
+    return res.json({ ok: true, deleted: id });
+  } catch (err) {
+    console.error('DELETE /api/messages error', err);
+    res.status(500).json({ error: 'delete failed' });
+  }
+});
+
+    // DELETE all messages (reset chat)
+app.delete('/api/conversations/all', async (req, res) => {
+  try {
+    await poolText.execute('DELETE FROM messages');
+    await poolFiles.execute('DELETE FROM files');
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('DELETE /api/conversations/all error', err);
+    res.status(500).json({ error: 'delete all failed' });
+  }
+});
+
 // multer memory storage
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB cap
 
@@ -179,6 +211,7 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 app.listen(PORT, () => {
   console.log('Server listening on port', PORT);
 });
+
 
 
 
