@@ -239,28 +239,24 @@ app.post('/api/messages', async (req, res) => {
 app.get('/api/messages', async (req, res) => {
   try {
     const limit = Math.min(1000, Number(req.query.limit || 200));
-    const convId = req.query.conversation_id || null;
+    const convoId = req.query.conversation_id || null;
 
     let rows;
-    if (convId) {
-      const [r] = await poolText.execute(
-        `SELECT id, role, content, parent_id, attachment_id, attachment_url, attachment_name, attachment_type, conversation_id, created_at
+    if (convoId) {
+      [rows] = await poolText.execute(
+        `SELECT id, role, content, parent_id, attachment_id, attachment_url, attachment_name, attachment_type, created_at
          FROM messages
          WHERE conversation_id = ?
-         ORDER BY created_at ASC
-         LIMIT ?`,
-        [convId, limit]
+         ORDER BY created_at ASC LIMIT ?`,
+        [convoId, limit]
       );
-      rows = r;
     } else {
-      const [r] = await poolText.execute(
-        `SELECT id, role, content, parent_id, attachment_id, attachment_url, attachment_name, attachment_type, conversation_id, created_at
+      [rows] = await poolText.execute(
+        `SELECT id, role, content, parent_id, attachment_id, attachment_url, attachment_name, attachment_type, created_at
          FROM messages
-         ORDER BY created_at ASC
-         LIMIT ?`,
+         ORDER BY created_at ASC LIMIT ?`,
         [limit]
       );
-      rows = r;
     }
 
     return res.json(rows);
@@ -288,6 +284,7 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 app.listen(PORT, () => {
   console.log('Server listening on port', PORT);
 });
+
 
 
 
